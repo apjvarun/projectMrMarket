@@ -1,0 +1,8 @@
+streamlit
+yfinance
+pandas
+plotly
+python-dotenv
+langchain-google-genai
+langchain-community
+duckduckgo-search
