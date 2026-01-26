@@ -2,191 +2,177 @@ import streamlit as st
 import os
 import yfinance as yf
 import pandas as pd
-import numpy as np
 import plotly.express as px
+import plotly.graph_objects as go
 from dotenv import load_dotenv
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_community.tools import DuckDuckGoSearchRun
 
-# --- 1. SETUP & AUTH ---
-st.set_page_config(page_title="Varun's Portfolio Guard", page_icon="🛡️", layout="wide")
+# --- 1. CONFIGURATION ---
+st.set_page_config(page_title="Varun's Intelligence Terminal", page_icon="🦁", layout="wide")
 load_dotenv()
 
-# Simple Password Protection
-def check_password():
-    """Returns `True` if the user had the correct password."""
-    def password_entered():
-        if st.session_state["password"] == os.getenv("APP_PASSWORD", "varun123"):
-            st.session_state["password_correct"] = True
-            del st.session_state["password"]  # don't store password
-        else:
-            st.session_state["password_correct"] = False
+# --- 2. BACKEND: DATA & AI ---
+# Initialize the "Brain"
+llm = ChatGoogleGenerativeAI(model=os.getenv("GEMINI_MODEL", "gemini-1.5-flash"))
 
-    if "password_correct" not in st.session_state:
-        st.text_input("Enter Access Code", type="password", on_change=password_entered, key="password")
-        return False
-    elif not st.session_state["password_correct"]:
-        st.text_input("Enter Access Code", type="password", on_change=password_entered, key="password")
-        st.error("😕 Access Denied")
-        return False
-    else:
-        return True
+def get_stock_data(ticker, period="6mo"):
+    """Fetches historical data."""
+    try:
+        stock = yf.Ticker(ticker)
+        hist = stock.history(period=period)
+        return hist
+    except:
+        return pd.DataFrame()
 
-if not check_password():
-    st.stop()
-
-# --- 2. BACKEND LOGIC ---
-llm = ChatGoogleGenerativeAI(model=os.getenv("GEMINI_MODEL", "gemini-2.0-flash"))
-
-def fetch_portfolio_data(tickers):
+def get_portfolio_metrics(tickers):
     """
-    Fetches Price AND Risk Data (Stress Testing).
+    Fetches price, change, and volatility for the portfolio.
+    Returns a DataFrame ready for plotting.
     """
     data = []
     for t in tickers:
         try:
             stock = yf.Ticker(t)
-            # Fetch 1 month of history for Volatility calc
-            hist = stock.history(period="1mo")
-            
-            if len(hist) >= 2:
-                # Price Data
-                close = hist['Close'].iloc[-1]
-                prev_close = hist['Close'].iloc[-2]
-                change_pct = ((close - prev_close) / prev_close) * 100
+            hist = stock.history(period="1mo") # 1 month for volatility
+            if len(hist) > 1:
+                curr = hist['Close'].iloc[-1]
+                prev = hist['Close'].iloc[-2]
+                change_pct = ((curr - prev) / prev) * 100
                 
-                # Risk Data (Simple Volatility Stress Test)
-                # Calculate standard deviation of daily returns
+                # Volatility (Standard Deviation of daily returns)
                 daily_returns = hist['Close'].pct_change().dropna()
-                volatility = daily_returns.std() * 100 # In percentage
+                volatility = daily_returns.std() * 100
                 
-                # Risk Label
-                if volatility > 2.5: risk_label = "🔥 High"
-                elif volatility > 1.5: risk_label = "⚠️ Med"
-                else: risk_label = "✅ Low"
-
                 data.append({
                     "Ticker": t,
-                    "Price": close,
-                    "Change (%)": change_pct,
-                    "Volatility (30d)": f"{volatility:.2f}%",
-                    "Risk Level": risk_label
+                    "Price": curr,
+                    "Daily Change %": change_pct,
+                    "Volatility (Risk)": volatility,
+                    "Volume": hist['Volume'].iloc[-1]
                 })
         except:
             pass
     return pd.DataFrame(data)
 
-def generate_morning_brief(portfolio_df):
+def portfolio_chat_agent(query, portfolio_df):
     """
-    AI synthesizes the 'Daily Digest' based on the data.
+    Context-aware chatbot that knows your portfolio data.
     """
-    data_str = portfolio_df.to_string(index=False)
+    data_context = portfolio_df.to_string(index=False)
     prompt = (
-        f"Here is my portfolio status today:\n{data_str}\n\n"
-        f"Task: Write a 'Daily Executive Digest' for me (Varun). "
-        f"1. Summarize the overall health (Green/Red). "
-        f"2. Flag any stock with 'High' risk level and explain why volatility might be high (general knowledge). "
-        f"3. Keep it professional, concise, and under 150 words."
+        f"You are a financial portfolio assistant. Here is the user's real-time portfolio data:\n"
+        f"{data_context}\n\n"
+        f"User Query: {query}\n"
+        f"Task: Answer the query briefly based strictly on the data above. "
+        f"If asked for advice, suggest based on 'High Volatility' (Risk) vs 'Return' logic."
     )
     response = llm.invoke(prompt)
     return response.content
 
-def scout_opportunities(sector, strategy):
-    """
-    Scouts for new stocks based on Strategy (e.g., Growth vs Value).
-    """
+def deep_dive_analysis(ticker):
+    """Deep dive research agent."""
     search = DuckDuckGoSearchRun()
-    query = f"top {strategy} stocks in {sector} sector to buy now news analysis"
-    raw_news = search.invoke(query)
-    
+    news = search.invoke(f"{ticker} stock news analysis buy sell hold")
     prompt = (
-        f"Based on this news search: {raw_news}\n"
-        f"Task: Recommend 3 specific stocks that fit the '{strategy}' strategy in '{sector}'. "
-        f"For each, provide: \n"
-        f"1. Ticker\n"
-        f"2. The 'Alpha' (Why it might grow)\n"
-        f"3. One risk factor."
+        f"Analyze {ticker} based on this news: {news}\n"
+        f"Provide a 'Bull vs Bear' analysis and a final verdict."
     )
-    response = llm.invoke(prompt)
-    return response.content
+    return llm.invoke(prompt).content
 
 # --- 3. FRONTEND UI ---
 
-# Sidebar: Portfolio Settings
+# Sidebar: Portfolio State
 with st.sidebar:
-    st.header("💼 My Portfolio")
+    st.header("🦁 Portfolio Config")
     if "portfolio" not in st.session_state:
-        st.session_state["portfolio"] = ["AAPL", "NVDA", "TSLA", "MSFT"]
+        st.session_state["portfolio"] = ["AAPL", "NVDA", "TSLA", "MSFT", "GOOGL"]
     
-    portfolio_input = st.text_area(
-        "Holdings (Comma Separated)", 
-        value=", ".join(st.session_state["portfolio"])
-    )
-    st.session_state["portfolio"] = [x.strip().upper() for x in portfolio_input.split(",")]
-    
-    st.divider()
-    st.caption(f"Logged in as: Varun")
-    if st.button("Logout"):
-        st.session_state["password_correct"] = False
-        st.rerun()
+    # Portfolio Editor
+    user_tickers = st.text_area("Your Tickers", value=", ".join(st.session_state["portfolio"]))
+    st.session_state["portfolio"] = [x.strip().upper() for x in user_tickers.split(",")]
+    st.caption("Updates apply immediately.")
 
-# Main Header
-st.title("🛡️ Portfolio Guard AI")
-st.markdown(f"**Welcome back, Varun.** Here is your daily intelligence briefing.")
+# Main App
+st.title("Varun's Intelligence Terminal")
+tab1, tab2 = st.tabs(["🛡️ Portfolio Guard (Chat & Charts)", "🔬 Deep Dive Research"])
 
-# Tabs for different "Modes"
-tab1, tab2 = st.tabs(["📊 Daily Digest & Health", "🔭 Opportunity Scout"])
-
+# --- TAB 1: PORTFOLIO GUARD ---
 with tab1:
-    if st.button("🔄 Generate Daily Digest", type="primary"):
-        with st.spinner("Analyzing market data and volatility..."):
-            # 1. Fetch Data
-            df = fetch_portfolio_data(st.session_state["portfolio"])
-            
-            # 2. AI Digest Section
-            st.subheader("📝 Executive Morning Brief")
-            digest = generate_morning_brief(df)
-            st.info(digest)
-            
-            st.divider()
-            
-            # 3. The "Stress Test" Grid
-            st.subheader("❤️ Portfolio Health Check")
-            
-            # Visual Risk Meter
-            high_risk_count = len(df[df['Risk Level'].str.contains("High")])
-            if high_risk_count > 0:
-                st.warning(f"⚠️ Stress Alert: {high_risk_count} of your assets are showing high volatility today.")
-            else:
-                st.success("✅ Portfolio Stability: Healthy. No abnormal volatility detected.")
-
-            # Data Table
-            st.dataframe(
-                df.style.map(lambda x: 'color: red' if 'High' in str(x) else 'color: green', subset=['Risk Level']),
-                use_container_width=True
-            )
-            
-            # Visual Performance
-            st.subheader("Performance Map")
-            fig = px.treemap(
-                df, path=['Ticker'], values='Price',
-                color='Change (%)',
-                color_continuous_scale=['red', 'black', 'green'],
-                range_color=[-3, 3]
-            )
-            st.plotly_chart(fig, use_container_width=True)
-
-with tab2:
-    st.subheader("🔭 Find Your Next Winner")
+    col_a, col_b = st.columns([2, 1])
     
-    col1, col2 = st.columns(2)
-    with col1:
-        sector = st.selectbox("Sector", ["Artificial Intelligence", "Clean Energy", "BioTech", "FinTech", "Cybersecurity"])
-    with col2:
-        strategy = st.selectbox("Strategy", ["High Growth", "Undervalued / Dip", "Safe Dividend"])
+    # A. The Data Engine
+    with col_a:
+        st.subheader("Market Pulse")
+        with st.spinner("Scanning market data..."):
+            df = get_portfolio_metrics(st.session_state["portfolio"])
+            
+            # 1. Performance Heatmap (Bar Chart)
+            fig_perf = px.bar(
+                df, x='Ticker', y='Daily Change %',
+                color='Daily Change %',
+                color_continuous_scale=['red', 'gray', 'green'],
+                range_color=[-3, 3],
+                title="Today's Performance"
+            )
+            st.plotly_chart(fig_perf, use_container_width=True)
+            
+            # 2. Risk vs Reward Scatter (The "Fancy" Chart)
+            st.subheader("Risk vs. Reward Radar")
+            st.caption("Top Left = Good (Low Risk, High Gain). Bottom Right = Bad (High Risk, Low Gain).")
+            
+            if not df.empty:
+                fig_risk = px.scatter(
+                    df, x='Volatility (Risk)', y='Daily Change %',
+                    size='Price', color='Ticker', text='Ticker',
+                    title="Volatility Analysis (Size = Stock Price)"
+                )
+                fig_risk.update_traces(textposition='top center')
+                st.plotly_chart(fig_risk, use_container_width=True)
+
+    # B. The Portfolio Chatbot
+    with col_b:
+        st.subheader("💬 Ask the Analyst")
+        st.info("Ask about your portfolio (e.g., 'What should I sell?', 'Who is riskiest?')")
         
-    if st.button("Scout Opportunities"):
-        with st.spinner(f"Scouting {sector} for {strategy} plays..."):
-            report = scout_opportunities(sector, strategy)
-            st.markdown(report)
-            st.caption("⚠️ AI-generated research. Not financial advice.")
+        # Initialize Chat History
+        if "messages" not in st.session_state:
+            st.session_state.messages = []
+
+        # Display Chat History
+        for message in st.session_state.messages:
+            with st.chat_message(message["role"]):
+                st.markdown(message["content"])
+
+        # Chat Input
+        if prompt := st.chat_input("Ask about your stocks..."):
+            # 1. User Message
+            st.session_state.messages.append({"role": "user", "content": prompt})
+            with st.chat_message("user"):
+                st.markdown(prompt)
+            
+            # 2. AI Response
+            with st.chat_message("assistant"):
+                with st.spinner("Analyzing portfolio data..."):
+                    response = portfolio_chat_agent(prompt, df)
+                    st.markdown(response)
+            
+            st.session_state.messages.append({"role": "assistant", "content": response})
+
+# --- TAB 2: DEEP DIVE (Research) ---
+with tab2:
+    st.subheader("Single Stock Research")
+    t_input = st.text_input("Enter Ticker", value="AMZN").upper()
+    
+    if st.button("Analyze Stock"):
+        with st.spinner("Fetching Bloomberg-level data..."):
+            # Chart
+            hist = get_stock_data(t_input)
+            fig = go.Figure(data=[go.Candlestick(x=hist.index,
+                open=hist['Open'], high=hist['High'],
+                low=hist['Low'], close=hist['Close'])])
+            st.plotly_chart(fig, use_container_width=True)
+            
+            # Analysis
+            analysis = deep_dive_analysis(t_input)
+            st.markdown(analysis)
